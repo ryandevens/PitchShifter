@@ -98,7 +98,6 @@ void PitchShifterAudioProcessor::prepareToPlay (double sampleRate, int samplesPe
     rb = std::make_unique<RubberBand::RubberBandStretcher>(sampleRate, getTotalNumOutputChannels(),RubberBand::RubberBandStretcher::Option::OptionProcessRealTime, 1.0f , 0.9f );
     
     rb->reset();
-    
 }
 
 void PitchShifterAudioProcessor::releaseResources()
@@ -130,21 +129,30 @@ bool PitchShifterAudioProcessor::isBusesLayoutSupported (const BusesLayout& layo
   #endif
 }
 #endif
-
+/*===================================================================*/
+/*======================== PROCESS BLOCK ============================*/
+/*
+    This is done specifically in conjunction with the AudioProgrammer
+    live stream.  The only difference is that he uses an audio transport.
+    This is a proof of concept that pitch shifting works and isolates the
+    issue to be in reading from the delayBuffer
+*/
+/*===================================================================*/
 void PitchShifterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
-
+    
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
-
+    
     auto outputSamples = buffer.getNumSamples();
     auto readPointers = mTempBuffer.getArrayOfReadPointers();
     auto writePointers = buffer.getArrayOfWritePointers();
     auto samplesAvailable = rb->available();
-   
+    
+    
     mTempBuffer.copyFrom(0, 0, buffer, 0, 0, buffer.getNumSamples());
     while (samplesAvailable < outputSamples)
     {
@@ -158,7 +166,7 @@ void PitchShifterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 //==============================================================================
 bool PitchShifterAudioProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    return true;
 }
 
 juce::AudioProcessorEditor* PitchShifterAudioProcessor::createEditor()
@@ -169,15 +177,12 @@ juce::AudioProcessorEditor* PitchShifterAudioProcessor::createEditor()
 //==============================================================================
 void PitchShifterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
+   
 }
 
 void PitchShifterAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
+  
 }
 
 //==============================================================================
