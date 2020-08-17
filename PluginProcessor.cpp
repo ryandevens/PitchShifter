@@ -19,9 +19,10 @@ PitchShifterAudioProcessor::PitchShifterAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ), apvts (*this, nullptr, "Parameters", createParameters()),  ringBuffer(143999)
 #endif
 {
+    apvts.state.addListener (this);
 }
 
 PitchShifterAudioProcessor::~PitchShifterAudioProcessor()
@@ -93,11 +94,9 @@ void PitchShifterAudioProcessor::changeProgramName (int index, const juce::Strin
 //==============================================================================
 void PitchShifterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    mTempBuffer.setSize(getTotalNumOutputChannels(), samplesPerBlock);
+    mSampleRate = sampleRate;
+    update();
     
-    rb = std::make_unique<RubberBand::RubberBandStretcher>(sampleRate, getTotalNumOutputChannels(),RubberBand::RubberBandStretcher::Option::OptionProcessRealTime, 1.0f , 0.9f );
-    
-    rb->reset();
 }
 
 void PitchShifterAudioProcessor::releaseResources()
@@ -129,44 +128,124 @@ bool PitchShifterAudioProcessor::isBusesLayoutSupported (const BusesLayout& layo
   #endif
 }
 #endif
-/*===================================================================*/
-/*======================== PROCESS BLOCK ============================*/
-/*
-    This is done specifically in conjunction with the AudioProgrammer
-    live stream.  The only difference is that he uses an audio transport.
-    This is a proof of concept that pitch shifting works and isolates the
-    issue to be in reading from the delayBuffer
-*/
-/*===================================================================*/
+
 void PitchShifterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+   // ringBuffer.reset();
+    if (mustUpdateProcessing)
+        update();
+    const float time = delayTime.get();
+    
+    auto feedback = feedbackLevel.get();
+    
+    
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
-    
+
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
     
-    auto outputSamples = buffer.getNumSamples();
-    auto readPointers = mTempBuffer.getArrayOfReadPointers();
-    auto writePointers = buffer.getArrayOfWritePointers();
-    auto samplesAvailable = rb->available();
+    writeToRingBuffer(buffer, 0, 0, writePos, 1.0, 1.0, true);
     
+    auto readPos = roundToInt (writePos - (mSampleRate * time / 1000.0));
     
-    mTempBuffer.copyFrom(0, 0, buffer, 0, 0, buffer.getNumSamples());
-    while (samplesAvailable < outputSamples)
+    if (readPos < 0)
+        readPos += ringBuffer.getSize();
+    readFromRingBuffer (buffer, 0, 0, readPos, 1.0, 1.0, false);
+    
+    // feedback
+    writeToRingBuffer (buffer, 0, 0, writePos, lastFeedbackLevel, feedback, false);
+    lastFeedbackLevel = feedback;
+   
+    expPos = readPos + buffer.getNumSamples();
+    if (expPos >= ringBuffer.getSize())
+        expPos -= ringBuffer.getSize();
+    
+   
+    
+    writePos += buffer.getNumSamples();
+    if (writePos >= ringBuffer.getSize())
+        writePos -= ringBuffer.getSize();
+}
+
+void PitchShifterAudioProcessor::writeToRingBuffer(AudioBuffer<float>& buffer, const int channelIn, const int channelOut,
+                      const int writePos, float startGain, float endGain, bool replacing)
+{
+    auto buffSize = buffer.getNumSamples();
+    auto ringSize = ringBuffer.getSize();
+    
+   
+    
+    if (writePos + buffSize <= ringSize)
     {
-        
-        rb->process(readPointers, mTempBuffer.getNumSamples(), false); //fills mTempBuffer
-        samplesAvailable = rb->available();
+        ringBuffer.write(buffer.getReadPointer(channelIn), buffSize);
+        DBG(ringBuffer.getWriteSpace());
     }
-    rb->retrieve(writePointers, buffer.getNumSamples());
+    /*-------------------------------------------------------*/
+    else
+    {
+        ringBuffer.reset();
+    const auto midPos  = ringSize - writePos;
+    const auto midGain = jmap (float (midPos) / buffSize, startGain, endGain);
+        
+        ringBuffer.write(buffer.getReadPointer(channelIn), midPos); // finishes filling buffer
+        
+        DBG(ringBuffer.getWriteSpace());
+        ringBuffer.write(buffer.getReadPointer(channelIn, midPos), buffSize - midPos); // starts filling new buffer with overlap
+        
+        
+    }
+    
+   
+}
+void PitchShifterAudioProcessor::readFromRingBuffer(AudioBuffer<float>& buffer,
+                                                   const int channelIn, const int channelOut,
+                                                   const int mReadPos, float startGain, float endGain,
+                                                   bool replacing)
+{
+    auto buffSize = buffer.getNumSamples();
+    auto ringSize = ringBuffer.getSize();
+    auto writePointers = buffer.getArrayOfWritePointers();
+    
+    
+    if (mReadPos + buffSize <= ringSize)
+    {
+        for(int i = 0; i < buffSize; i++)
+        {
+            //ringBuffer.readAdding(writePointers, 1);
+//            auto sample = ringBuffer.readOne();
+//            buffer.addSample(channelOut, i, sample);
+        }
+       
+        
+    }
+    else
+    {
+        const auto midPos  = ringSize - readPos;
+        const auto midGain = jmap (float (midPos) / buffSize, startGain, endGain);
+        
+        for(int i = 0; i < midPos; i++)
+        {
+            //ringBuffer.readAdding(buffer.getWritePointer(0, i), 1);
+//            auto sample = ringBuffer.readOne();
+//            buffer.addSample(channelOut, i, sample);
+        }
+        for(int i = midPos; i < buffSize; i++)
+        {
+            //ringBuffer.readAdding(buffer.getWritePointer(0, i), 1);
+//            auto sample = ringBuffer.readOne();
+//            buffer.addSample(channelOut, i, sample);
+        }
+        
+    }
+    
 }
 
 //==============================================================================
 bool PitchShifterAudioProcessor::hasEditor() const
 {
-    return true;
+    return true; // (change this to false if you choose to not supply an editor)
 }
 
 juce::AudioProcessorEditor* PitchShifterAudioProcessor::createEditor()
@@ -177,12 +256,15 @@ juce::AudioProcessorEditor* PitchShifterAudioProcessor::createEditor()
 //==============================================================================
 void PitchShifterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-   
+    // You should use this method to store your parameters in the memory block.
+    // You could do that either as raw data, or use the XML or ValueTree classes
+    // as intermediaries to make it easy to save and load complex data.
 }
 
 void PitchShifterAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-  
+    // You should use this method to restore your parameters from this memory block,
+    // whose contents will have been created by the getStateInformation() call.
 }
 
 //==============================================================================
@@ -190,4 +272,42 @@ void PitchShifterAudioProcessor::setStateInformation (const void* data, int size
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PitchShifterAudioProcessor();
+}
+
+void PitchShifterAudioProcessor::update()
+{
+    
+    mustUpdateProcessing = false;
+    auto time = apvts.getRawParameterValue ("Time");
+    auto fb = apvts.getRawParameterValue("FB");
+    
+    
+    
+    using mult = juce::ValueSmoothingTypes::Multiplicative;
+    using lin = juce::ValueSmoothingTypes::Linear;
+    
+    juce::SmoothedValue<float, lin> delay;
+    delay.setTargetValue(*time);
+    
+    juce::SmoothedValue<float, lin> feedback;
+    feedback.setTargetValue(*fb);
+
+    
+    delayTime = delay.getNextValue();
+    feedbackLevel = feedback.getNextValue();
+
+    
+}
+
+juce::AudioProcessorValueTreeState::ParameterLayout PitchShifterAudioProcessor::createParameters()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> parameters;
+    
+    parameters.push_back (std::make_unique<AudioParameterFloat>("Time", "Delay Time", NormalisableRange<float> (0.0f, 2000.f, 1.f, 1.0f), delayTime.get()));
+
+    parameters.push_back (std::make_unique<AudioParameterFloat>("FB", "Feedback",
+                                                                NormalisableRange<float> (0.0f, 1.0f, 0.01f, 1.0f), feedbackLevel.get()));
+   
+    
+    return { parameters.begin(), parameters.end() };
 }
