@@ -19,7 +19,7 @@ PitchShifterAudioProcessor::PitchShifterAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       ), apvts (*this, nullptr, "Parameters", createParameters()),  ringBuffer(143999)
+                       ), apvts (*this, nullptr, "Parameters", createParameters()),  delayBuffer(2, 96000)
 #endif
 {
     apvts.state.addListener (this);
@@ -129,15 +129,17 @@ bool PitchShifterAudioProcessor::isBusesLayoutSupported (const BusesLayout& layo
 }
 #endif
 
-void PitchShifterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+void PitchShifterAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midiMessages)
 {
-   // ringBuffer.reset();
     if (mustUpdateProcessing)
         update();
-    const float time = delayTime.get();
+
     
-    auto feedback = feedbackLevel.get();
+    // const for the life of this process block
+    const float feedback = feedbackLevel.get();
+    auto delaySize = delayBuffer.getNumSamples();
     
+    //DBG(lastFeedbackLevel);
     
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
@@ -148,52 +150,60 @@ void PitchShifterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     
     writeToRingBuffer(buffer, 0, 0, writePos, 1.0, 1.0, true);
     
-    auto readPos = roundToInt (writePos - (mSampleRate * time / 1000.0));
+    readPos = roundToInt (writePos - (mSampleRate * delayTime.get() / 1000.0));
+                if (readPos < 0)
+                    readPos += delaySize;
+    readFromRingBuffer(buffer, 0, 0, readPos, 1.0, 1.0, true);
+//    for (int j = 0; j < buffer.getNumSamples(); ++j)
+//    {
+//        if (mustUpdateProcessing)
+//            update();
+//        auto* writePtr = buffer.getWritePointer(0);
+//        auto* readPtr = delayBuffer.getReadPointer(0);
+//        readPos = roundToInt (writePos - (mSampleRate * delayTime.get() / 1000.0));
+//        if (readPos < 0)
+//            readPos += delaySize;
+//        /* retrieve sample from ringBuffer */
+//        auto sample = readPtr[readPos];
+//        /* write to and fill the audio buffer (output) at each index */
+//        writePtr[j] += sample;
+//        writePos += 1;
+//
+//        readPos = readPos % delaySize;
+//    }
     
-    if (readPos < 0)
-        readPos += ringBuffer.getSize();
-    readFromRingBuffer (buffer, 0, 0, readPos, 1.0, 1.0, false);
-    
+
     // feedback
     writeToRingBuffer (buffer, 0, 0, writePos, lastFeedbackLevel, feedback, false);
     lastFeedbackLevel = feedback;
-   
-    expPos = readPos + buffer.getNumSamples();
-    if (expPos >= ringBuffer.getSize())
-        expPos -= ringBuffer.getSize();
-    
-   
     
     writePos += buffer.getNumSamples();
-    if (writePos >= ringBuffer.getSize())
-        writePos -= ringBuffer.getSize();
+    writePos = writePos % delaySize;
+    
+    DBG(writePos);
+
 }
 
+
 void PitchShifterAudioProcessor::writeToRingBuffer(AudioBuffer<float>& buffer, const int channelIn, const int channelOut,
-                      const int writePos, float startGain, float endGain, bool replacing)
+                      const int mWritePos, float startGain, float endGain, bool replacing)
 {
     auto buffSize = buffer.getNumSamples();
-    auto ringSize = ringBuffer.getSize();
+    auto delaySize = delayBuffer.getNumSamples();
     
-   
-    
-    if (writePos + buffSize <= ringSize)
+    if (mWritePos + buffSize <= delaySize)
     {
-        ringBuffer.write(buffer.getReadPointer(channelIn), buffSize);
-        DBG(ringBuffer.getWriteSpace());
+        delayBuffer.copyFromWithRamp(channelOut, mWritePos, buffer.getReadPointer(channelIn), buffSize, startGain, endGain);
+        
     }
     /*-------------------------------------------------------*/
     else
     {
-        ringBuffer.reset();
-    const auto midPos  = ringSize - writePos;
-    const auto midGain = jmap (float (midPos) / buffSize, startGain, endGain);
+        const auto midPos  = delaySize - mWritePos;
         
-        ringBuffer.write(buffer.getReadPointer(channelIn), midPos); // finishes filling buffer
-        
-        DBG(ringBuffer.getWriteSpace());
-        ringBuffer.write(buffer.getReadPointer(channelIn, midPos), buffSize - midPos); // starts filling new buffer with overlap
-        
+        const auto midGain = jmap (float (midPos) / buffSize, startGain, endGain);
+        delayBuffer.copyFromWithRamp(channelOut, mWritePos, buffer.getReadPointer(channelIn), midPos, startGain, midGain);
+        delayBuffer.copyFromWithRamp(channelOut, 0, buffer.getReadPointer(channelIn, midPos), buffSize - midPos, midGain, endGain);
         
     }
     
@@ -202,45 +212,38 @@ void PitchShifterAudioProcessor::writeToRingBuffer(AudioBuffer<float>& buffer, c
 void PitchShifterAudioProcessor::readFromRingBuffer(AudioBuffer<float>& buffer,
                                                    const int channelIn, const int channelOut,
                                                    const int mReadPos, float startGain, float endGain,
-                                                   bool replacing)
+                                                   bool pitchChange)
 {
     auto buffSize = buffer.getNumSamples();
-    auto ringSize = ringBuffer.getSize();
-    auto writePointers = buffer.getArrayOfWritePointers();
-    
-    
-    if (mReadPos + buffSize <= ringSize)
+    auto delaySize = delayBuffer.getNumSamples();
+    auto* writePtr = buffer.getWritePointer(channelOut);
+    auto* readPtr = delayBuffer.getReadPointer(channelIn);
+    float readFloat = readPos; // allow us to add and store float increments, then round later
+
+    for(int i = 0; i < buffSize; ++i)
     {
-        for(int i = 0; i < buffSize; i++)
-        {
-            //ringBuffer.readAdding(writePointers, 1);
-//            auto sample = ringBuffer.readOne();
-//            buffer.addSample(channelOut, i, sample);
-        }
-       
-        
+        /* retrieve sample from ringBuffer */
+        auto sample = readPtr[readPos];
+        /* write to and fill the audio buffer (output) at each index */
+        writePtr[i] += sample;
+
+        //DBG(readPos);
+        readPos += 1;
+        readPos = readPos % delaySize;
+
     }
-    else
-    {
-        const auto midPos  = ringSize - readPos;
-        const auto midGain = jmap (float (midPos) / buffSize, startGain, endGain);
-        
-        for(int i = 0; i < midPos; i++)
-        {
-            //ringBuffer.readAdding(buffer.getWritePointer(0, i), 1);
-//            auto sample = ringBuffer.readOne();
-//            buffer.addSample(channelOut, i, sample);
-        }
-        for(int i = midPos; i < buffSize; i++)
-        {
-            //ringBuffer.readAdding(buffer.getWritePointer(0, i), 1);
-//            auto sample = ringBuffer.readOne();
-//            buffer.addSample(channelOut, i, sample);
-        }
-        
-    }
-    
+
+
 }
+
+//void PitchShifterAudioProcessor::rectifyPos(float dSamples, float expSamples)
+//{
+//    if (dSamples == 0)
+//        dSamples = -1;
+//
+//    skipRatio = expSamples / dSamples;
+//
+//}
 
 //==============================================================================
 bool PitchShifterAudioProcessor::hasEditor() const
@@ -303,10 +306,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout PitchShifterAudioProcessor::
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> parameters;
     
-    parameters.push_back (std::make_unique<AudioParameterFloat>("Time", "Delay Time", NormalisableRange<float> (0.0f, 2000.f, 1.f, 1.0f), delayTime.get()));
+    parameters.push_back (std::make_unique<AudioParameterFloat>("Time", "Delay Time", NormalisableRange<float> (0.0f, 2000.f, 0.1f, 1.0f), 200.f));
 
     parameters.push_back (std::make_unique<AudioParameterFloat>("FB", "Feedback",
-                                                                NormalisableRange<float> (0.0f, 1.0f, 0.01f, 1.0f), feedbackLevel.get()));
+                                                                NormalisableRange<float> (0.0f, 1.0f, 0.01f, 1.0f), 0.0f));
    
     
     return { parameters.begin(), parameters.end() };

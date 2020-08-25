@@ -11,6 +11,8 @@
 #include <JuceHeader.h>
 #include <rubberband/RubberBandStretcher.h>
 #include <src/base/RingBuffer.h>
+//#include <include/pedal/CircularBuffer.hpp>
+//#include <include/pedal/Delay.hpp>
 
 //==============================================================================
 /**
@@ -35,13 +37,15 @@ public:
     
     void writeToRingBuffer(AudioBuffer<float>& buffer,
                             const int channelIn, const int channelOut,
-                            const int writePos, float startGain, float endGain,
+                            const int mWritePos, float startGain, float endGain,
                             bool replacing);
     void readFromRingBuffer (AudioBuffer<float>& buffer,
                               const int channelIn, const int channelOut,
                               const int readPos, float startGain, float endGain,
                               bool replacing);
-
+    void getNextSample();
+    
+    void rectifyPos(float dSamples, float expSamples);
     //==============================================================================
     AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override;
@@ -67,17 +71,21 @@ public:
     
     // Called when user changes parameters
     void update();
-    RubberBand::RingBuffer<float> ringBuffer;
+    
     // Store Parameters
     AudioProcessorValueTreeState apvts;
     AudioProcessorValueTreeState::ParameterLayout createParameters();
 
 private:
     
+    AudioBuffer<float>  delayBuffer;
     
     int writePos = 0;
     int readPos = 0;
     int expPos = 0;
+    float skipRatio = 1.f;
+    float delaySamples = -200.f;
+    float expectedSamples = -200.f;
     
     double second;
     bool isActive { false };
